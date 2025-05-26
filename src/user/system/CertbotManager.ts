@@ -16,99 +16,6 @@ const WEBROOT_PATH_IN_CAPTAIN =
 
 const shouldUseStaging = false // CaptainConstants.isDebug;
 
-// Add this new method to your original CertbotManager class
-    public async enableSslDns01Cloudflare(
-        domainName: string,
-        emailAddress: string, // Changed from 'email' to match CaptainManager
-        credentialsHostPath: string,
-        propagationSeconds?: number
-    ): Promise<boolean> { // Return boolean to match original enableSsl
-        this.domainValidOrThrow(domainName);
-
-        if (!fs.pathExistsSync(credentialsHostPath)) { // Ensure fs is imported
-            throw ApiStatusCodes.createError( // Ensure ApiStatusCodes is imported
-                ApiStatusCodes.STATUS_ERROR_GENERIC,
-                `DNS credentials file not found at ${credentialsHostPath}`
-            );
-        }
-
-        await this.ensureDomainHasDirectory(domainName);
-
-        const certbotImage = CaptainConstants.configs.certbotImageName; // Ensure CaptainConstants is imported
-        const credentialsContainerPath = '/etc/letsencrypt/cloudflare.ini';
-
-        const volumes: IAppVolume[] = [ // Explicitly type as IAppVolume[]
-            {
-                hostPath: CaptainConstants.letsEncryptEtcPath, // These constants are from the main data export
-                containerPath: '/etc/letsencrypt',
-            },
-            {
-                hostPath: CaptainConstants.letsEncryptLibPath, // These constants are from the main data export
-                containerPath: '/var/lib/letsencrypt',
-            },
-            {
-                // WEBROOT_PATH_IN_CAPTAIN and WEBROOT_PATH_IN_CERTBOT are defined at the top of original CertbotManager.ts
-                hostPath: WEBROOT_PATH_IN_CAPTAIN,
-                containerPath: WEBROOT_PATH_IN_CERTBOT,
-            },
-            {
-                hostPath: credentialsHostPath,
-                containerPath: credentialsContainerPath,
-                // mode: 'ro', // The IAppVolume interface in masterbranch_AppDefinition.ts might not have 'mode'.
-                               // DockerApi.updateService applies ReadOnly:false by default for BIND mounts.
-                               // If ReadOnly is desired, DockerApi.updateService logic for BIND mounts needs adjustment
-                               // or IAppVolume needs a 'readOnly?: boolean' field. For now, accept read-write.
-            },
-        ];
-
-        // Call updateService with all parameters, passing undefined for those not being changed
-        await this.dockerApi.updateService(
-            CaptainConstants.certbotServiceName, // serviceName
-            certbotImage,                        // imageName
-            volumes,                             // volumes
-            undefined,                           // networks
-            undefined,                           // arrayOfEnvKeyAndValue
-            undefined,                           // secrets
-            undefined,                           // authObject
-            undefined,                           // instanceCount
-            undefined,                           // nodeId
-            undefined,                           // namespace
-            undefined,                           // ports
-            undefined,                           // appObject
-            undefined,                           // updateOrder
-            undefined,                           // serviceUpdateOverride
-            undefined                            // preDeployFunction
-        );
-
-        await Utils.getDelayedPromise(12000); // Ensure Utils is imported
-
-        const command = [
-            'certbot',
-            'certonly',
-            // '--non-interactive' is added by this.runCommand
-            '--agree-tos',
-            '--email', emailAddress,
-            '--dns-cloudflare',
-            '--dns-cloudflare-credentials', credentialsContainerPath,
-            '-d', domainName,
-        ];
-
-        if (propagationSeconds) {
-            command.push('--dns-cloudflare-propagation-seconds', propagationSeconds.toString());
-        }
-
-        // shouldUseStaging is defined at the top of original CertbotManager.ts
-        if (shouldUseStaging) {
-            command.push('--staging');
-        }
-
-        const output = await this.runCommand(command);
-        Logger.d(output); // Ensure Logger is imported
-
-        // isCertCommandSuccess is defined at the top of original CertbotManager.ts
-        return isCertCommandSuccess(output);
-    }
-
 function isCertCommandSuccess(output: string) {
     // https://github.com/certbot/certbot/blob/099c6c8b240400b928d6b349e023e5e8414611e6/certbot/certbot/_internal/main.py#L516
     if (
@@ -208,6 +115,100 @@ class CertbotManager {
                 })
             })
     }
+
+// Add this new method to your original CertbotManager class
+    public async enableSslDns01Cloudflare(
+        domainName: string,
+        emailAddress: string, // Changed from 'email' to match CaptainManager
+        credentialsHostPath: string,
+        propagationSeconds?: number
+    ): Promise<boolean> { // Return boolean to match original enableSsl
+        this.domainValidOrThrow(domainName);
+
+        if (!fs.pathExistsSync(credentialsHostPath)) { // Ensure fs is imported
+            throw ApiStatusCodes.createError( // Ensure ApiStatusCodes is imported
+                ApiStatusCodes.STATUS_ERROR_GENERIC,
+                `DNS credentials file not found at ${credentialsHostPath}`
+            );
+        }
+
+        await this.ensureDomainHasDirectory(domainName);
+
+        const certbotImage = CaptainConstants.configs.certbotImageName; // Ensure CaptainConstants is imported
+        const credentialsContainerPath = '/etc/letsencrypt/cloudflare.ini';
+
+        const volumes: IAppVolume[] = [ // Explicitly type as IAppVolume[]
+            {
+                hostPath: CaptainConstants.letsEncryptEtcPath, // These constants are from the main data export
+                containerPath: '/etc/letsencrypt',
+            },
+            {
+                hostPath: CaptainConstants.letsEncryptLibPath, // These constants are from the main data export
+                containerPath: '/var/lib/letsencrypt',
+            },
+            {
+                // WEBROOT_PATH_IN_CAPTAIN and WEBROOT_PATH_IN_CERTBOT are defined at the top of original CertbotManager.ts
+                hostPath: WEBROOT_PATH_IN_CAPTAIN,
+                containerPath: WEBROOT_PATH_IN_CERTBOT,
+            },
+            {
+                hostPath: credentialsHostPath,
+                containerPath: credentialsContainerPath,
+                // mode: 'ro', // The IAppVolume interface in masterbranch_AppDefinition.ts might not have 'mode'.
+                               // DockerApi.updateService applies ReadOnly:false by default for BIND mounts.
+                               // If ReadOnly is desired, DockerApi.updateService logic for BIND mounts needs adjustment
+                               // or IAppVolume needs a 'readOnly?: boolean' field. For now, accept read-write.
+            },
+        ];
+
+        // Call updateService with all parameters, passing undefined for those not being changed
+        await this.dockerApi.updateService(
+            CaptainConstants.certbotServiceName, // serviceName
+            certbotImage,                        // imageName
+            volumes,                             // volumes
+            undefined,                           // networks
+            undefined,                           // arrayOfEnvKeyAndValue
+            undefined,                           // secrets
+            undefined,                           // authObject
+            undefined,                           // instanceCount
+            undefined,                           // nodeId
+            undefined,                           // namespace
+            undefined,                           // ports
+            undefined,                           // appObject
+            undefined,                           // updateOrder
+            undefined,                           // serviceUpdateOverride
+            undefined                            // preDeployFunction
+        );
+
+        await Utils.getDelayedPromise(12000); // Ensure Utils is imported
+
+        const command = [
+            'certbot',
+            'certonly',
+            // '--non-interactive' is added by this.runCommand
+            '--agree-tos',
+            '--email', emailAddress,
+            '--dns-cloudflare',
+            '--dns-cloudflare-credentials', credentialsContainerPath,
+            '-d', domainName,
+        ];
+
+        if (propagationSeconds) {
+            command.push('--dns-cloudflare-propagation-seconds', propagationSeconds.toString());
+        }
+
+        // shouldUseStaging is defined at the top of original CertbotManager.ts
+        if (shouldUseStaging) {
+            command.push('--staging');
+        }
+
+        const output = await this.runCommand(command);
+        Logger.d(output); // Ensure Logger is imported
+
+        // isCertCommandSuccess is defined at the top of original CertbotManager.ts
+        return isCertCommandSuccess(output);
+    }
+
 
     ensureRegistered(emailAddress: string) {
         const self = this
