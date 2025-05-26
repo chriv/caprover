@@ -7,7 +7,7 @@ import Logger from '../../utils/Logger'
 import Utils from '../../utils/Utils'
 import fs = require('fs-extra')
 import ShellQuote = require('shell-quote')
-import Docker = require('dockerode')
+import * as Dockerode from 'dockerode'
 
 const WEBROOT_PATH_IN_CERTBOT = '/captain-webroot'
 const WEBROOT_PATH_IN_CAPTAIN =
@@ -189,15 +189,21 @@ class CertbotManager {
         const serviceName = CaptainConstants.certbotServiceName
         const targetImage = CaptainConstants.configs.certbotImageName
 
-        const serviceInspectInfo: Docker.ServiceInfo = await this.dockerApi.inspectService(serviceName)
-        const serviceSpec: Docker.ServiceSpec = serviceInspectInfo.Spec! // This is Docker.ServiceSpec
+        const serviceInspectInfo: Dockerode.ServiceInfo = await this.dockerApi.inspectService(serviceName)
+        const serviceSpec: Dockerode.ServiceSpec = serviceInspectInfo.Spec! 
 
         let needsUpdate = false
+        
+        const taskTemplate = serviceSpec.TaskTemplate; // Dockerode.TaskSpec | undefined
+        let currentImageInSpec: string | undefined;
+        if (taskTemplate && taskTemplate.ContainerSpec) {
+            currentImageInSpec = taskTemplate.ContainerSpec.Image;
+        }
 
         // 1. Check image
-        if (serviceSpec.TaskTemplate.ContainerSpec.Image !== targetImage) {
+        if (currentImageInSpec !== targetImage) {
             Logger.d(
-                `Certbot service image requires update from ${serviceSpec.TaskTemplate.ContainerSpec.Image} to ${targetImage}.`
+                `Certbot service image requires update from ${currentImageInSpec || 'undefined'} to ${targetImage}.`
             )
             needsUpdate = true
         }
@@ -225,13 +231,15 @@ class CertbotManager {
             containerPath: credsFilePathInContainer,
         }
 
-        // currentDockerodeMounts are Docker.Mount[] from dockerode
-        const currentDockerodeMounts: Docker.Mount[] =
-            serviceSpec.TaskTemplate.ContainerSpec.Mounts || []
-
+        // currentDockerodeMounts are Dockerode.Mount[] from dockerode
+        let currentDockerodeMounts: Dockerode.Mount[] = [];
+        if (taskTemplate && taskTemplate.ContainerSpec) {
+            currentDockerodeMounts = taskTemplate.ContainerSpec.Mounts || [];
+        }
+        
         // Check if the specific credential mount already exists with correct properties
         const credMountExists = currentDockerodeMounts.some(
-            (m: Docker.Mount) => // m is a Docker.Mount object
+            (m: Dockerode.Mount) => // m is a Dockerode.Mount object
                 m.Target === credsFilePathInContainer && // Compare with the path in container
                 m.Source === credsFilePathOnHost && // Compare with the path on host
                 m.Type === 'bind' && // Check if it's a bind mount

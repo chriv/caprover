@@ -1,5 +1,5 @@
 import Base64Provider = require('js-base64')
-import Docker = require('dockerode')
+import * as Dockerode from 'dockerode';
 import { v4 as uuid } from 'uuid'
 import {
     IAppDef,
@@ -23,7 +23,6 @@ import CaptainConstants from '../utils/CaptainConstants'
 import EnvVars from '../utils/EnvVars'
 import Logger from '../utils/Logger'
 import Utils from '../utils/Utils'
-import Dockerode = require('dockerode')
 // @ts-expect-error "TODO"
 import dockerodeUtils = require('dockerode/lib/util')
 
@@ -97,12 +96,12 @@ export interface CreateContainerParams {
 }
 
 class DockerApi {
-    private dockerode: Docker
+    private dockerode: Dockerode
 
     public dockerNeedsUpdate = false
 
-    constructor(connectionParams: Docker.DockerOptions) {
-        this.dockerode = new Docker(connectionParams)
+    constructor(connectionParams: Dockerode.DockerOptions) {
+        this.dockerode = new Dockerode(connectionParams)
     }
 
     static get() {
@@ -318,7 +317,7 @@ class DockerApi {
                     )
                 }
 
-                const optionsForBuild: Dockerode.ImageBuildOptions = {
+                const optionsForBuild: Dockerode.ImageBuildOptions = { // Already Dockerode here, but ensure consistency
                     t: imageName,
                     buildargs: buildargs,
                 }
@@ -610,7 +609,7 @@ class DockerApi {
             envs.push(`${e.key}=${e.value}`)
         }
 
-        let container: Docker.Container | undefined = undefined
+        let container: Dockerode.Container | undefined = undefined
 
         return Promise.resolve()
             .then(function () {
@@ -915,7 +914,7 @@ class DockerApi {
             })
     }
 
-    public inspectService(serviceName: string): Promise<Docker.ServiceInfo> {
+    public inspectService(serviceName: string): Promise<Dockerode.ServiceInfo> {
         return this.dockerode.getService(serviceName).inspect();
     }
 
@@ -1079,7 +1078,7 @@ class DockerApi {
     ensureSecretOnService(serviceName: string, secretName: string) {
         const self = this
 
-        let secretToExpose: Docker.Secret
+        let secretToExpose: Dockerode.Secret
 
         return self.dockerode
             .listSecrets({
@@ -1773,7 +1772,7 @@ class DockerApi {
 }
 
 const dockerApiAddressSplited = (EnvVars.CAPTAIN_DOCKER_API || '').split(':')
-const connectionParams: Docker.DockerOptions =
+const connectionParams: Dockerode.DockerOptions =
     dockerApiAddressSplited.length < 2
         ? {
               socketPath: CaptainConstants.dockerSocketPath,
@@ -1794,7 +1793,7 @@ const dockerApiInstance = new DockerApi(connectionParams)
 const lowVersionDocker = JSON.parse(JSON.stringify(connectionParams))
 lowVersionDocker.version = 'v1.38'
 
-new Docker(lowVersionDocker)
+new Dockerode(lowVersionDocker) // Changed Docker to Dockerode here
     .version()
     .then((data) => {
         Logger.d('Docker API Version on host: ' + data.ApiVersion)
