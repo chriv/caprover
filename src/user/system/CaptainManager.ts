@@ -797,11 +797,32 @@ class CaptainManager {
                 return self.certbotManager.ensureRegistered(emailAddress)
             })
             .then(function () {
-                return self.certbotManager.enableSsl(
-                    `${
-                        CaptainConstants.configs.captainSubDomain
-                    }.${self.dataStore.getRootDomain()}`
-                )
+                const rootDomainName = `${
+                    CaptainConstants.configs.captainSubDomain
+                }.${self.dataStore.getRootDomain()}`
+
+                const rootSslConfig = CaptainConstants.configs.rootSslConfig
+                if (
+                    rootSslConfig &&
+                    rootSslConfig.challengeType === 'dns-01' &&
+                    rootSslConfig.dnsProvider === 'cloudflare' &&
+                    rootSslConfig.cloudflareApiTokenPath
+                ) {
+                    Logger.d(
+                        `Enabling SSL for ${rootDomainName} using DNS-01 challenge with Cloudflare.`
+                    )
+                    return self.certbotManager.enableSslDns01(
+                        rootDomainName,
+                        emailAddress,
+                        rootSslConfig.dnsProvider,
+                        rootSslConfig.cloudflareApiTokenPath
+                    )
+                } else {
+                    Logger.d(
+                        `Enabling SSL for ${rootDomainName} using HTTP-01 challenge.`
+                    )
+                    return self.certbotManager.enableSsl(rootDomainName)
+                }
             })
             .then(function () {
                 return self.dataStore.setUserEmailAddress(emailAddress)
