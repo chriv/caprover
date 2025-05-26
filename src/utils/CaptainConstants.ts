@@ -70,6 +70,19 @@ const configs = {
     nginxPortNumber443: EnvVars.CAPTAIN_HOST_HTTPS_PORT,
     // The port can be overridden via env variable CAPTAIN_HOST_ADMIN_PORT
     adminPortNumber3000: EnvVars.CAPTAIN_HOST_ADMIN_PORT,
+
+    rootSslConfig: undefined as
+        | undefined
+        | {
+              challengeType?: string
+              dnsProvider?: string
+              // Specific path for Cloudflare, as used in CaptainManager
+              cloudflareApiTokenPath?: string
+              // A more generic one for future use with other providers
+              dnsProviderCredentialsPath?: string
+              // Propagation seconds, optional
+              propagationSeconds?: number
+          },
 }
 
 export interface CertbotCertCommandRule {

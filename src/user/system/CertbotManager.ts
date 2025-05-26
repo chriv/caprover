@@ -15,6 +15,8 @@ const WEBROOT_PATH_IN_CAPTAIN =
 
 const shouldUseStaging = false // CaptainConstants.isDebug;
 
+const DNS_CREDENTIALS_PATH_IN_CERTBOT = '/creds.ini'
+
 function isCertCommandSuccess(output: string) {
     // https://github.com/certbot/certbot/blob/099c6c8b240400b928d6b349e023e5e8414611e6/certbot/certbot/_internal/main.py#L516
     if (
@@ -113,6 +115,179 @@ class CertbotManager {
                     )
                 })
             })
+    }
+
+    public async enableSslDns01(
+        domainName: string,
+        emailAddress: string,
+        dnsProvider: string, // Should be 'cloudflare' or other supported providers
+        credsFilePathOnHost: string
+    ): Promise<boolean> {
+        this.domainValidOrThrow(domainName)
+
+        if (!fs.pathExistsSync(credsFilePathOnHost)) {
+            throw ApiStatusCodes.createError(
+                ApiStatusCodes.STATUS_ERROR_GENERIC,
+                `DNS credentials file not found at ${credsFilePathOnHost}`
+            )
+        }
+
+        await this.ensureDomainHasDirectory(domainName)
+
+        // Ensure certbot service is configured with the DNS credentials mounted
+        await this.ensureCertbotServiceConfigurationForDns01(
+            credsFilePathOnHost,
+            DNS_CREDENTIALS_PATH_IN_CERTBOT
+        )
+
+        Logger.d(`Enabling SSL for ${domainName} using DNS-01 challenge with ${dnsProvider}`)
+
+        const cmd = [
+            'certbot',
+            'certonly',
+            // '--non-interactive' is added by runCommand
+            '--agree-tos', // this is needed for certonly
+            '--email',
+            emailAddress,
+            `--authenticator`,
+            `dns-${dnsProvider}`, // e.g., dns-cloudflare
+            `--dns-${dnsProvider}-credentials`,
+            DNS_CREDENTIALS_PATH_IN_CERTBOT, // Path inside the container
+            '-d',
+            domainName,
+        ]
+
+        if (CaptainConstants.configs.rootSslConfig?.propagationSeconds) {
+            cmd.push(`--dns-${dnsProvider}-propagation-seconds`)
+            cmd.push(CaptainConstants.configs.rootSslConfig.propagationSeconds.toString())
+        }
+
+        if (shouldUseStaging) {
+            cmd.push('--staging')
+        }
+
+        const output = await this.runCommand(cmd)
+        Logger.d(output)
+
+        if (isCertCommandSuccess(output)) {
+            return true
+        }
+
+        throw ApiStatusCodes.createError(
+            ApiStatusCodes.VERIFICATION_FAILED,
+            `Unexpected output when enabling SSL for ${domainName} with ACME Certbot (DNS-01):\n${output}`
+        )
+    }
+
+    private async ensureCertbotServiceConfigurationForDns01(
+        credsFilePathOnHost: string,
+        credsFilePathInContainer: string
+    ) {
+        Logger.d('Ensuring Certbot service is configured for DNS-01 challenge.')
+
+        const serviceName = CaptainConstants.certbotServiceName
+        const targetImage = CaptainConstants.configs.certbotImageName
+
+        const serviceDetails = await this.dockerApi.getServiceDetails(serviceName)
+
+        let needsUpdate = false
+
+        // 1. Check image
+        if (serviceDetails.Spec.TaskTemplate.ContainerSpec.Image !== targetImage) {
+            Logger.d(`Certbot service image requires update from ${serviceDetails.Spec.TaskTemplate.ContainerSpec.Image} to ${targetImage}.`)
+            needsUpdate = true
+        }
+
+        // 2. Check mounts for DNS credentials
+        const defaultMounts = [
+            {
+                HostPath: CaptainConstants.letsEncryptEtcPath,
+                ContainerPath: '/etc/letsencrypt',
+            },
+            {
+                HostPath: CaptainConstants.letsEncryptLibPath,
+                ContainerPath: '/var/lib/letsencrypt',
+            },
+            {
+                HostPath: WEBROOT_PATH_IN_CAPTAIN,
+                ContainerPath: WEBROOT_PATH_IN_CERTBOT,
+            },
+        ]
+        const newCredentialMount = {
+            HostPath: credsFilePathOnHost,
+            ContainerPath: credsFilePathInContainer,
+            ReadOnly: true, // Credentials should be read-only
+        }
+
+        let currentMounts = serviceDetails.Spec.TaskTemplate.ContainerSpec.Mounts || []
+        
+        // Filter out any existing credential mount to avoid duplicates if the path is the same
+        currentMounts = currentMounts.filter(
+            (m) => m.Target !== credsFilePathInContainer && m.Source !== credsFilePathOnHost
+        )
+
+        const targetMounts = [...defaultMounts.map(m => ({
+                Type: 'bind',
+                Source: m.HostPath,
+                Target: m.ContainerPath,
+            })), 
+            {
+                Type: 'bind',
+                Source: newCredentialMount.HostPath,
+                Target: newCredentialMount.ContainerPath,
+                ReadOnly: newCredentialMount.ReadOnly,
+            }
+        ]
+
+        // Basic check: if lengths are different, an update is likely needed.
+        if (currentMounts.length !== targetMounts.length) {
+            needsUpdate = true;
+        } else {
+            // More detailed check if an existing credential mount needs updating or if other mounts changed
+            const credMountExists = serviceDetails.Spec.TaskTemplate.ContainerSpec.Mounts?.some(
+                (m) => m.Target === credsFilePathInContainer && m.Source === credsFilePathOnHost && m.ReadOnly === newCredentialMount.ReadOnly
+            )
+            if (!credMountExists) {
+                Logger.d(`Certbot service credential mount for ${credsFilePathInContainer} is missing or incorrect.`)
+                needsUpdate = true
+            }
+        }
+
+
+        if (needsUpdate) {
+            Logger.d(`Updating Certbot service (${serviceName}) for DNS-01 challenge mounts or image.`)
+            
+            // Convert to Dockerode types for updateService
+            const finalMountsForUpdate = targetMounts.map(m => ({
+                Source: m.Source,
+                Target: m.Target,
+                Type: m.Type as "bind" | "volume" | "tmpfs" | "npipe" | "cluster", // Added type assertion
+                ReadOnly: !!m.ReadOnly, // Ensure ReadOnly is boolean
+            }))
+
+
+            await this.dockerApi.updateService(
+                serviceName,
+                targetImage,
+                finalMountsForUpdate,
+                undefined, // networks - no change
+                undefined, // env vars - no change
+                undefined, // ports - no change
+                undefined, // nodeId - no change
+                undefined, // replicas - no change
+                undefined, // workDir - no change
+                undefined, // entrypoint - no change
+                undefined, // extraHosts - no change
+                undefined, // labels - no change
+                undefined, // memoryBytes - no change
+                undefined, // cpuShares - no change
+                undefined // healthcheck - no change
+            )
+            Logger.d('Certbot service updated. Waiting 12 seconds for it to settle...')
+            await Utils.getDelayedPromise(12000)
+        } else {
+            Logger.d('Certbot service configuration is already suitable for DNS-01.')
+        }
     }
 
     ensureRegistered(emailAddress: string) {
