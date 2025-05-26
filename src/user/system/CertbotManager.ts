@@ -1,80 +1,557 @@
-import CaptainConstants from '../../utils/CaptainConstants';
-import DockerApi from '../../docker/DockerApi';
-import Utils from '../../utils/Utils';
+import ApiStatusCodes from '../../api/ApiStatusCodes'
+import DockerApi from '../../docker/DockerApi'
+import CaptainConstants, {
+    CertbotCertCommandRule,
+} from '../../utils/CaptainConstants'
+import Logger from '../../utils/Logger'
+import Utils from '../../utils/Utils'
+import fs = require('fs-extra')
+import ShellQuote = require('shell-quote')
+import { IAppVolume } from '../../models/AppDefinition';
 
-class CertbotManager {
-    private dockerApi: DockerApi;
+const WEBROOT_PATH_IN_CERTBOT = '/captain-webroot'
+const WEBROOT_PATH_IN_CAPTAIN =
+    CaptainConstants.captainStaticFilesDir +
+    CaptainConstants.nginxDomainSpecificHtmlDir
 
-    constructor(dockerApi: DockerApi) {
-        this.dockerApi = dockerApi;
-    }
+const shouldUseStaging = false // CaptainConstants.isDebug;
 
-    async enableSsl(domainName: string, email: string): Promise<void> {
-        const command = [
-            'certonly',
-            '--non-interactive',
-            '--agree-tos',
-            '--email', email,
-            '--webroot',
-            '-w', '/captain-certbot/webroot',
-            '-d', domainName,
-        ];
+// Add this new method to your original CertbotManager class
+    public async enableSslDns01Cloudflare(
+        domainName: string,
+        emailAddress: string, // Changed from 'email' to match CaptainManager
+        credentialsHostPath: string,
+        propagationSeconds?: number
+    ): Promise<boolean> { // Return boolean to match original enableSsl
+        this.domainValidOrThrow(domainName);
 
-        await this.dockerApi.executeCommand(CaptainConstants.certbotServiceName, command);
-    }
+        if (!fs.pathExistsSync(credentialsHostPath)) { // Ensure fs is imported
+            throw ApiStatusCodes.createError( // Ensure ApiStatusCodes is imported
+                ApiStatusCodes.STATUS_ERROR_GENERIC,
+                `DNS credentials file not found at ${credentialsHostPath}`
+            );
+        }
 
-    async enableSslDns01Cloudflare(domainName: string, email: string): Promise<void> {
-        const cfg = CaptainConstants.configs.rootSslConfig;
-        if (!cfg) throw new Error('Missing rootSslConfig');
+        await this.ensureDomainHasDirectory(domainName);
 
-        const certbotImage = CaptainConstants.configs.certbotImageName;
-        const credentialsHostPath = cfg.credentialsFilePath;
+        const certbotImage = CaptainConstants.configs.certbotImageName; // Ensure CaptainConstants is imported
         const credentialsContainerPath = '/etc/letsencrypt/cloudflare.ini';
 
-        const volumes = [
+        const volumes: IAppVolume[] = [ // Explicitly type as IAppVolume[]
             {
-                hostPath: '/captain/data/letsencrypt',
+                hostPath: CaptainConstants.letsEncryptEtcPath, // These constants are from the main data export
                 containerPath: '/etc/letsencrypt',
             },
             {
-                hostPath: '/captain/data/certbot/webroot',
-                containerPath: '/captain-certbot/webroot',
+                hostPath: CaptainConstants.letsEncryptLibPath, // These constants are from the main data export
+                containerPath: '/var/lib/letsencrypt',
+            },
+            {
+                // WEBROOT_PATH_IN_CAPTAIN and WEBROOT_PATH_IN_CERTBOT are defined at the top of original CertbotManager.ts
+                hostPath: WEBROOT_PATH_IN_CAPTAIN,
+                containerPath: WEBROOT_PATH_IN_CERTBOT,
             },
             {
                 hostPath: credentialsHostPath,
                 containerPath: credentialsContainerPath,
+                // mode: 'ro', // The IAppVolume interface in masterbranch_AppDefinition.ts might not have 'mode'.
+                               // DockerApi.updateService applies ReadOnly:false by default for BIND mounts.
+                               // If ReadOnly is desired, DockerApi.updateService logic for BIND mounts needs adjustment
+                               // or IAppVolume needs a 'readOnly?: boolean' field. For now, accept read-write.
             },
         ];
 
+        // Call updateService with all parameters, passing undefined for those not being changed
         await this.dockerApi.updateService(
             CaptainConstants.certbotServiceName, // serviceName
             certbotImage,                        // imageName
             volumes,                             // volumes
             undefined,                           // networks
+            undefined,                           // arrayOfEnvKeyAndValue
+            undefined,                           // secrets
+            undefined,                           // authObject
+            undefined,                           // instanceCount
+            undefined,                           // nodeId
+            undefined,                           // namespace
             undefined,                           // ports
-            undefined,                           // envVars
-            undefined,                           // mounts (deprecated/unused)
-            undefined                            // restartPolicy
+            undefined,                           // appObject
+            undefined,                           // updateOrder
+            undefined,                           // serviceUpdateOverride
+            undefined                            // preDeployFunction
         );
 
-        await Utils.getDelayedPromise(12000); // allow service to update
+        await Utils.getDelayedPromise(12000); // Ensure Utils is imported
 
         const command = [
+            'certbot',
             'certonly',
-            '--non-interactive',
+            // '--non-interactive' is added by this.runCommand
             '--agree-tos',
-            '--email', email,
+            '--email', emailAddress,
             '--dns-cloudflare',
             '--dns-cloudflare-credentials', credentialsContainerPath,
             '-d', domainName,
         ];
 
-        if (cfg.propagationSeconds) {
-            command.push('--dns-cloudflare-propagation-seconds', cfg.propagationSeconds.toString());
+        if (propagationSeconds) {
+            command.push('--dns-cloudflare-propagation-seconds', propagationSeconds.toString());
         }
 
-        await this.dockerApi.executeCommand(CaptainConstants.certbotServiceName, command);
+        // shouldUseStaging is defined at the top of original CertbotManager.ts
+        if (shouldUseStaging) {
+            command.push('--staging');
+        }
+
+        const output = await this.runCommand(command);
+        Logger.d(output); // Ensure Logger is imported
+
+        // isCertCommandSuccess is defined at the top of original CertbotManager.ts
+        return isCertCommandSuccess(output);
+    }
+
+function isCertCommandSuccess(output: string) {
+    // https://github.com/certbot/certbot/blob/099c6c8b240400b928d6b349e023e5e8414611e6/certbot/certbot/_internal/main.py#L516
+    if (
+        output.indexOf(
+            'Congratulations! Your certificate and chain have been saved'
+        ) >= 0
+    ) {
+        return true
+    }
+
+    // https://github.com/certbot/certbot/blob/f4e031f5055fc6bf8c87eb0b18f927f7f5ba36a8/certbot/certbot/_internal/main.py#L632
+    if (output.indexOf('Successfully received certificate') >= 0) {
+        return true
+    }
+
+    // https://github.com/certbot/certbot/blob/f4e031f5055fc6bf8c87eb0b18f927f7f5ba36a8/certbot/certbot/_internal/main.py#L1596
+    if (
+        output.indexOf(
+            'Certificate not yet due for renewal; no action taken'
+        ) >= 0
+    ) {
+        return true
+    }
+
+    return false
+}
+
+class CertbotManager {
+    private isOperationInProcess: boolean
+    private certCommandGenerator = new CertCommandGenerator(
+        CaptainConstants.configs.certbotCertCommandRules ?? [],
+        'certbot certonly --webroot -w ${webroot} -d ${domainName}'
+    )
+
+    constructor(private dockerApi: DockerApi) {
+        this.dockerApi = dockerApi
+    }
+
+    domainValidOrThrow(domainName: string) {
+        if (!domainName) {
+            throw new Error('Domain Name is empty')
+        }
+
+        const RegExpression = /^[a-z0-9\.\-]*$/
+
+        if (!RegExpression.test(domainName)) {
+            throw new Error('Bad Domain Name!')
+        }
+    }
+
+    getCertRelativePathForDomain(domainName: string) {
+        const self = this
+
+        self.domainValidOrThrow(domainName)
+
+        return `/live/${domainName}/fullchain.pem`
+    }
+
+    getKeyRelativePathForDomain(domainName: string) {
+        const self = this
+
+        self.domainValidOrThrow(domainName)
+
+        return `/live/${domainName}/privkey.pem`
+    }
+    enableSsl(domainName: string) {
+        const self = this
+
+        Logger.d(`Enabling SSL for ${domainName}`)
+
+        return Promise.resolve()
+            .then(function () {
+                self.domainValidOrThrow(domainName)
+                return self.ensureDomainHasDirectory(domainName)
+            })
+            .then(function () {
+                const cmd = self.certCommandGenerator.getCertbotCertCommand(
+                    domainName,
+                    WEBROOT_PATH_IN_CERTBOT + '/' + domainName
+                )
+
+                if (shouldUseStaging) {
+                    cmd.push('--staging')
+                }
+
+                return self.runCommand(cmd).then(function (output) {
+                    Logger.d(output)
+
+                    if (isCertCommandSuccess(output)) {
+                        return true
+                    }
+
+                    throw ApiStatusCodes.createError(
+                        ApiStatusCodes.VERIFICATION_FAILED,
+                        `Unexpected output when enabling SSL for${domainName} with ACME Certbot \n ${output}`
+                    )
+                })
+            })
+    }
+
+    ensureRegistered(emailAddress: string) {
+        const self = this
+
+        return Promise.resolve()
+            .then(function () {
+                // Creds used to be saved at
+                // /etc/letencrypt/accounts/acme-v01.api.letsencrypt.org/directory/9fc95dbca2f0b877
+                // After moving to 0.29.1, Certbot started using v2 API. and this path is no longer valid.
+                // Instead, they use v02 path. However, old installations who registered with v1, will remain in the same directory
+                const cmd = [
+                    'certbot',
+                    'register',
+                    '--email',
+                    emailAddress,
+                    '--agree-tos',
+                    '--no-eff-email',
+                ]
+
+                if (shouldUseStaging) {
+                    cmd.push('--staging')
+                }
+
+                return self.runCommand(cmd)
+            })
+            .then(function (registerOutput) {
+                if (
+                    registerOutput.includes(
+                        'Your account credentials have been saved in your Certbot'
+                    ) ||
+                    registerOutput.includes('Account registered.')
+                ) {
+                    return true
+                }
+
+                if (
+                    registerOutput.indexOf('There is an existing account') >= 0
+                ) {
+                    return true
+                }
+
+                throw new Error(
+                    `Unexpected output when registering with ACME Certbot \n ${registerOutput}`
+                )
+            })
+    }
+
+    /*
+  Certificate Name: customdomain-another.hm2.caprover.com
+    Domains: customdomain-another.hm2.caprover.com
+    Expiry Date: 2019-03-22 04:22:55+00:00 (VALID: 81 days)
+    Certificate Path: /etc/letsencrypt/live/customdomain-another.hm2.caprover.com/fullchain.pem
+    Private Key Path: /etc/letsencrypt/live/customdomain-another.hm2.caprover.com/privkey.pem
+  Certificate Name: testing.cp.hm.caprover.com
+    Domains: testing.cp.hm.caprover.com
+    Expiry Date: 2019-03-21 18:42:17+00:00 (VALID: 81 days)
+    Certificate Path: /etc/letsencrypt/live/testing.cp.hm.caprover.com/fullchain.pem
+    Private Key Path: /etc/letsencrypt/live/testing.cp.hm.caprover.com/privkey.pem
+  Certificate Name: registry.cp.hm.caprover.com
+    Domains: registry.cp.hm.caprover.com
+    Expiry Date: 2019-03-25 04:56:45+00:00 (VALID: 84 days)
+    Certificate Path: /etc/letsencrypt/live/registry.cp.hm.caprover.com/fullchain.pem
+    Private Key Path: /etc/letsencrypt/live/registry.cp.hm.caprover.com/privkey.pem
+  Certificate Name: captain.cp.hm.caprover.com
+    Domains: captain.cp.hm.caprover.com
+    Expiry Date: 2019-03-20 22:25:50+00:00 (VALID: 80 days)
+    Certificate Path: /etc/letsencrypt/live/captain.cp.hm.caprover.com/fullchain.pem
+    Private Key Path: /etc/letsencrypt/live/captain.cp.hm.caprover.com/privkey.pem
+  Certificate Name: testing2.cp.hm.caprover.com
+    Domains: testing2.cp.hm.caprover.com
+    Expiry Date: 2019-03-21 18:42:55+00:00 (VALID: 81 days)
+    Certificate Path: /etc/letsencrypt/live/testing2.cp.hm.caprover.com/fullchain.pem
+    Private Key Path: /etc/letsencrypt/live/testing2.cp.hm.caprover.com/privkey.pem
+
+*/
+    ensureAllCurrentlyRegisteredDomainsHaveDirs() {
+        const self = this
+        return Promise.resolve() //
+            .then(function () {
+                return self
+                    .runCommand(['certbot', 'certificates'])
+                    .then(function (output) {
+                        const lines = output.split('\n')
+                        const domains: string[] = []
+                        lines.forEach((l) => {
+                            if (l.indexOf('Certificate Name:') >= 0) {
+                                domains.push(
+                                    l.replace('Certificate Name:', '').trim()
+                                )
+                            }
+                        })
+
+                        return domains
+                    })
+            })
+            .then(function (allDomains) {
+                const p = Promise.resolve()
+                allDomains.forEach((d) => {
+                    p.then(function () {
+                        return self.ensureDomainHasDirectory(d)
+                    })
+                })
+
+                return p
+            })
+    }
+
+    lock() {
+        if (this.isOperationInProcess) {
+            throw ApiStatusCodes.createError(
+                ApiStatusCodes.STATUS_ERROR_GENERIC,
+                'Another operation is in process for Certbot. Please wait a few seconds and try again.'
+            )
+        }
+
+        this.isOperationInProcess = true
+    }
+
+    unlock() {
+        this.isOperationInProcess = false
+    }
+
+    runCommand(cmd: string[]) {
+        const dockerApi = this.dockerApi
+        const self = this
+
+        return Promise.resolve().then(function () {
+            self.lock()
+
+            const nonInterActiveCommand = [...cmd, '--non-interactive']
+            return dockerApi
+                .executeCommand(
+                    CaptainConstants.certbotServiceName,
+                    nonInterActiveCommand
+                )
+                .then(function (data) {
+                    self.unlock()
+                    Logger.dev(data)
+                    return data
+                })
+                .catch(function (error) {
+                    self.unlock()
+                    throw error
+                })
+        })
+    }
+
+    ensureDomainHasDirectory(domainName: string) {
+        return Promise.resolve() //
+            .then(function () {
+                return fs.ensureDir(`${WEBROOT_PATH_IN_CAPTAIN}/${domainName}`)
+            })
+    }
+
+    renewAllCerts() {
+        const self = this
+
+        /*
+        From Certbot docs:
+            This command attempts to renew all previously-obtained certificates that expire in less than 30 days.
+            The same plugin and options that were used at the time the certificate was originally issued will be
+            used for the renewal attempt, unless you specify other plugins or options. Unlike certonly, renew
+            acts on multiple certificates and always takes into account whether each one is near expiry. Because
+            of this, renew is suitable (and designed) for automated use, to allow your system to automatically
+            renew each certificate when appropriate. Since renew only renews certificates that are near expiry
+            it can be run as frequently as you want - since it will usually take no action.
+         */
+
+        const cmd = ['certbot', 'renew']
+
+        if (shouldUseStaging) {
+            cmd.push('--staging')
+        }
+
+        return Promise.resolve() //
+            .then(function () {
+                return self.ensureAllCurrentlyRegisteredDomainsHaveDirs()
+            })
+            .then(function () {
+                return self.runCommand(cmd)
+            })
+            .then(function (output) {
+                // Ignore output :)
+            })
+            .catch(function (err) {
+                Logger.e(err)
+            })
+    }
+
+    init(myNodeId: string) {
+        const dockerApi = this.dockerApi
+        const self = this
+
+        function createCertbotServiceOnNode(nodeId: string) {
+            Logger.d('Creating Certbot service')
+
+            return dockerApi
+                .createServiceOnNodeId(
+                    CaptainConstants.configs.certbotImageName,
+                    CaptainConstants.certbotServiceName,
+                    undefined,
+                    nodeId,
+                    undefined,
+                    undefined,
+                    undefined
+                )
+                .then(function () {
+                    Logger.d('Waiting for Certbot...')
+                    return Utils.getDelayedPromise(12000)
+                })
+        }
+
+        return Promise.resolve()
+            .then(function () {
+                return fs.ensureDir(CaptainConstants.letsEncryptEtcPath)
+            })
+            .then(function () {
+                return fs.ensureDir(CaptainConstants.letsEncryptLibPath)
+            })
+            .then(function () {
+                return fs.ensureDir(WEBROOT_PATH_IN_CAPTAIN)
+            })
+            .then(function () {
+                return dockerApi.isServiceRunningByName(
+                    CaptainConstants.certbotServiceName
+                )
+            })
+            .then(function (isRunning) {
+                if (isRunning) {
+                    Logger.d('Captain Certbot is already running.. ')
+
+                    return dockerApi.getNodeIdByServiceName(
+                        CaptainConstants.certbotServiceName,
+                        0
+                    )
+                } else {
+                    Logger.d(
+                        'No Captain Certbot service is running. Creating one...'
+                    )
+
+                    return createCertbotServiceOnNode(myNodeId) //
+                        .then(function () {
+                            return myNodeId
+                        })
+                }
+            })
+            .then(function (nodeId) {
+                if (nodeId !== myNodeId) {
+                    Logger.d(
+                        'Captain Certbot is running on a different node. Removing...'
+                    )
+
+                    return dockerApi
+                        .removeServiceByName(
+                            CaptainConstants.certbotServiceName
+                        )
+                        .then(function () {
+                            Logger.d('Waiting for Certbot to be removed...')
+                            return Utils.getDelayedPromise(10000)
+                        })
+                        .then(function () {
+                            return createCertbotServiceOnNode(myNodeId).then(
+                                function () {
+                                    return true
+                                }
+                            )
+                        })
+                } else {
+                    return true
+                }
+            })
+            .then(function () {
+                Logger.d('Updating Certbot service...')
+
+                return dockerApi.updateService(
+                    CaptainConstants.certbotServiceName,
+                    CaptainConstants.configs.certbotImageName,
+                    [
+                        {
+                            hostPath: CaptainConstants.letsEncryptEtcPath,
+                            containerPath: '/etc/letsencrypt',
+                        },
+                        {
+                            hostPath: CaptainConstants.letsEncryptLibPath,
+                            containerPath: '/var/lib/letsencrypt',
+                        },
+                        {
+                            hostPath: WEBROOT_PATH_IN_CAPTAIN,
+                            containerPath: WEBROOT_PATH_IN_CERTBOT,
+                        },
+                    ],
+                    // No need to certbot to be connected to the network
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined
+                )
+            })
+            .then(function () {
+                return self.ensureAllCurrentlyRegisteredDomainsHaveDirs()
+            })
     }
 }
 
-export = CertbotManager;
+export default CertbotManager
+
+export class CertCommandGenerator {
+    constructor(
+        private rules: CertbotCertCommandRule[],
+        private defaultCommand: string
+    ) {}
+
+    private getCertbotCertCommandTemplate(domainName: string): string {
+        for (const rule of this.rules) {
+            if (
+                rule.domain === '*' ||
+                domainName === rule.domain ||
+                domainName.endsWith('.' + rule.domain)
+            ) {
+                return rule.command ?? this.defaultCommand
+            }
+        }
+        return this.defaultCommand
+    }
+    getCertbotCertCommand(domainName: string, webroot: string): string[] {
+        const variables: Record<string, string> = {
+            domainName,
+            webroot,
+        }
+        const command = this.getCertbotCertCommandTemplate(domainName)
+        const parsed = ShellQuote.parse(command, (key: string) => {
+            return variables[key] ?? `\${${key}}`
+        })
+        if (parsed.some((x) => typeof x !== 'string')) {
+            throw new Error(`Invalid command: ${command}`)
+        }
+        return parsed as string[]
+    }
+}
