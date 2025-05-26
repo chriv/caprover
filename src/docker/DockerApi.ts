@@ -915,6 +915,10 @@ class DockerApi {
             })
     }
 
+    public inspectService(serviceName: string): Promise<Docker.ServiceInfo> {
+        return this.dockerode.getService(serviceName).inspect();
+    }
+
     isServiceRunningByName(serviceName: string) {
         return this.dockerode
             .getService(serviceName)

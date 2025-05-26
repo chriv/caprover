@@ -189,8 +189,8 @@ class CertbotManager {
         const serviceName = CaptainConstants.certbotServiceName
         const targetImage = CaptainConstants.configs.certbotImageName
 
-        const serviceInspectInfo = await this.dockerApi.getService(serviceName).inspect()
-        const serviceSpec = serviceInspectInfo.Spec // This is Docker.ServiceSpec
+        const serviceInspectInfo: Docker.ServiceInfo = await this.dockerApi.inspectService(serviceName)
+        const serviceSpec: Docker.ServiceSpec = serviceInspectInfo.Spec! // This is Docker.ServiceSpec
 
         let needsUpdate = false
 
