@@ -188,7 +188,9 @@ class CertbotManager {
         const serviceName = CaptainConstants.certbotServiceName
         const targetImage = CaptainConstants.configs.certbotImageName
 
-        const serviceDetails = await this.dockerApi.getServiceDetails(serviceName)
+        // Error TS2339: Property 'getServiceDetails' does not exist on type 'DockerApi'.
+        // Corrected to 'getServiceDetail'
+        const serviceDetails = await this.dockerApi.getServiceDetail(serviceName, false)
 
         let needsUpdate = false
 
@@ -199,77 +201,76 @@ class CertbotManager {
         }
 
         // 2. Check mounts for DNS credentials
-        const defaultMounts = [
+        // Define mounts with lowercase 'h' and 'c' for hostPath/containerPath
+        const defaultMounts: { hostPath: string; containerPath: string }[] = [
             {
-                HostPath: CaptainConstants.letsEncryptEtcPath,
-                ContainerPath: '/etc/letsencrypt',
+                hostPath: CaptainConstants.letsEncryptEtcPath,
+                containerPath: '/etc/letsencrypt',
             },
             {
-                HostPath: CaptainConstants.letsEncryptLibPath,
-                ContainerPath: '/var/lib/letsencrypt',
+                hostPath: CaptainConstants.letsEncryptLibPath,
+                containerPath: '/var/lib/letsencrypt',
             },
             {
-                HostPath: WEBROOT_PATH_IN_CAPTAIN,
-                ContainerPath: WEBROOT_PATH_IN_CERTBOT,
+                hostPath: WEBROOT_PATH_IN_CAPTAIN,
+                containerPath: WEBROOT_PATH_IN_CERTBOT,
             },
         ]
-        const newCredentialMount = {
-            HostPath: credsFilePathOnHost,
-            ContainerPath: credsFilePathInContainer,
-            ReadOnly: true, // Credentials should be read-only
+
+        // This is the definition for comparison with Dockerode existing mounts
+        const newCredentialMountDefinition = {
+            hostPath: credsFilePathOnHost,
+            containerPath: credsFilePathInContainer,
+            type: 'bind' as DockerApi.MountTypeStr,
+            readOnly: true,
+        }
+        // This is the simplified object for DockerApi.updateService
+        const newCredentialMountForUpdateService = {
+            hostPath: credsFilePathOnHost,
+            containerPath: credsFilePathInContainer,
         }
 
-        let currentMounts = serviceDetails.Spec.TaskTemplate.ContainerSpec.Mounts || []
-        
-        // Filter out any existing credential mount to avoid duplicates if the path is the same
-        currentMounts = currentMounts.filter(
-            (m) => m.Target !== credsFilePathInContainer && m.Source !== credsFilePathOnHost
+        const currentDockerodeMounts: { Source?: string; Target?: string; Type?: DockerApi.MountTypeStr; ReadOnly?: boolean }[] =
+            serviceDetails.Spec.TaskTemplate.ContainerSpec.Mounts || []
+
+        // Check if the specific credential mount already exists with correct properties
+        // Error TS7006: Parameter 'm' implicitly has an 'any' type. Typed to any.
+        const credMountExists = currentDockerodeMounts.some(
+            (m: any) =>
+                m.Target === newCredentialMountDefinition.containerPath &&
+                m.Source === newCredentialMountDefinition.hostPath &&
+                m.Type === newCredentialMountDefinition.type &&
+                m.ReadOnly === newCredentialMountDefinition.readOnly
         )
 
-        const targetMounts = [...defaultMounts.map(m => ({
-                Type: 'bind',
-                Source: m.HostPath,
-                Target: m.ContainerPath,
-            })), 
-            {
-                Type: 'bind',
-                Source: newCredentialMount.HostPath,
-                Target: newCredentialMount.ContainerPath,
-                ReadOnly: newCredentialMount.ReadOnly,
-            }
-        ]
+        // Determine the total number of expected mounts
+        // Start with default mounts, and add the new credential mount if it's not already effectively part of default (it shouldn't be)
+        // The main check is if the specific newCredentialMountDefinition is present among currentDockerodeMounts
+        const expectedMountCount = defaultMounts.length + 1 
 
-        // Basic check: if lengths are different, an update is likely needed.
-        if (currentMounts.length !== targetMounts.length) {
-            needsUpdate = true;
-        } else {
-            // More detailed check if an existing credential mount needs updating or if other mounts changed
-            const credMountExists = serviceDetails.Spec.TaskTemplate.ContainerSpec.Mounts?.some(
-                (m) => m.Target === credsFilePathInContainer && m.Source === credsFilePathOnHost && m.ReadOnly === newCredentialMount.ReadOnly
+        if (!credMountExists || currentDockerodeMounts.length !== expectedMountCount) {
+             Logger.d(
+                `Certbot service credential mount for ${credsFilePathInContainer} is missing, incorrect, or mount count differs. Needs update.`
             )
-            if (!credMountExists) {
-                Logger.d(`Certbot service credential mount for ${credsFilePathInContainer} is missing or incorrect.`)
-                needsUpdate = true
-            }
+            needsUpdate = true
         }
 
 
         if (needsUpdate) {
             Logger.d(`Updating Certbot service (${serviceName}) for DNS-01 challenge mounts or image.`)
-            
-            // Convert to Dockerode types for updateService
-            const finalMountsForUpdate = targetMounts.map(m => ({
-                Source: m.Source,
-                Target: m.Target,
-                Type: m.Type as "bind" | "volume" | "tmpfs" | "npipe" | "cluster", // Added type assertion
-                ReadOnly: !!m.ReadOnly, // Ensure ReadOnly is boolean
-            }))
 
+            // Construct the final list of mounts for updateService, ensuring lowercase properties
+            // And ensure the credential mount is unique by containerPath.
+            let finalMountsForUpdate = defaultMounts.filter(
+                 // Error TS7006: Parameter 'm' implicitly has an 'any' type. Typed.
+                (m: { hostPath: string; containerPath: string }) => m.containerPath !== newCredentialMountForUpdateService.containerPath
+            )
+            finalMountsForUpdate.push(newCredentialMountForUpdateService)
 
             await this.dockerApi.updateService(
                 serviceName,
                 targetImage,
-                finalMountsForUpdate,
+                finalMountsForUpdate, // This should be IAppVolume[] compatible
                 undefined, // networks - no change
                 undefined, // env vars - no change
                 undefined, // ports - no change
