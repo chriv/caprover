@@ -7,6 +7,7 @@ import Logger from '../../utils/Logger'
 import Utils from '../../utils/Utils'
 import fs = require('fs-extra')
 import ShellQuote = require('shell-quote')
+import Docker = require('dockerode')
 
 const WEBROOT_PATH_IN_CERTBOT = '/captain-webroot'
 const WEBROOT_PATH_IN_CAPTAIN =
@@ -188,20 +189,21 @@ class CertbotManager {
         const serviceName = CaptainConstants.certbotServiceName
         const targetImage = CaptainConstants.configs.certbotImageName
 
-        // Error TS2339: Property 'getServiceDetails' does not exist on type 'DockerApi'.
-        // Corrected to 'getServiceDetail'
-        const serviceDetails = await this.dockerApi.getServiceDetail(serviceName, false)
+        const serviceInspectInfo = await this.dockerApi.getService(serviceName).inspect()
+        const serviceSpec = serviceInspectInfo.Spec // This is Docker.ServiceSpec
 
         let needsUpdate = false
 
         // 1. Check image
-        if (serviceDetails.Spec.TaskTemplate.ContainerSpec.Image !== targetImage) {
-            Logger.d(`Certbot service image requires update from ${serviceDetails.Spec.TaskTemplate.ContainerSpec.Image} to ${targetImage}.`)
+        if (serviceSpec.TaskTemplate.ContainerSpec.Image !== targetImage) {
+            Logger.d(
+                `Certbot service image requires update from ${serviceSpec.TaskTemplate.ContainerSpec.Image} to ${targetImage}.`
+            )
             needsUpdate = true
         }
 
         // 2. Check mounts for DNS credentials
-        // Define mounts with lowercase 'h' and 'c' for hostPath/containerPath
+        // defaultMounts are IAppVolume compatible (for updateService)
         const defaultMounts: { hostPath: string; containerPath: string }[] = [
             {
                 hostPath: CaptainConstants.letsEncryptEtcPath,
@@ -217,60 +219,50 @@ class CertbotManager {
             },
         ]
 
-        // This is the definition for comparison with Dockerode existing mounts
-        const newCredentialMountDefinition = {
-            hostPath: credsFilePathOnHost,
-            containerPath: credsFilePathInContainer,
-            type: 'bind' as DockerApi.MountTypeStr,
-            readOnly: true,
-        }
-        // This is the simplified object for DockerApi.updateService
+        // newCredentialMountForUpdateService is IAppVolume compatible (for updateService)
         const newCredentialMountForUpdateService = {
             hostPath: credsFilePathOnHost,
             containerPath: credsFilePathInContainer,
         }
 
-        const currentDockerodeMounts: { Source?: string; Target?: string; Type?: DockerApi.MountTypeStr; ReadOnly?: boolean }[] =
-            serviceDetails.Spec.TaskTemplate.ContainerSpec.Mounts || []
+        // currentDockerodeMounts are Docker.Mount[] from dockerode
+        const currentDockerodeMounts: Docker.Mount[] =
+            serviceSpec.TaskTemplate.ContainerSpec.Mounts || []
 
         // Check if the specific credential mount already exists with correct properties
-        // Error TS7006: Parameter 'm' implicitly has an 'any' type. Typed to any.
         const credMountExists = currentDockerodeMounts.some(
-            (m: any) =>
-                m.Target === newCredentialMountDefinition.containerPath &&
-                m.Source === newCredentialMountDefinition.hostPath &&
-                m.Type === newCredentialMountDefinition.type &&
-                m.ReadOnly === newCredentialMountDefinition.readOnly
+            (m: Docker.Mount) => // m is a Docker.Mount object
+                m.Target === credsFilePathInContainer && // Compare with the path in container
+                m.Source === credsFilePathOnHost && // Compare with the path on host
+                m.Type === 'bind' && // Check if it's a bind mount
+                m.ReadOnly === true // Ensure it's read-only
         )
 
-        // Determine the total number of expected mounts
-        // Start with default mounts, and add the new credential mount if it's not already effectively part of default (it shouldn't be)
-        // The main check is if the specific newCredentialMountDefinition is present among currentDockerodeMounts
-        const expectedMountCount = defaultMounts.length + 1 
+        const expectedTotalMounts = defaultMounts.length + 1 // All defaults plus the new one
 
-        if (!credMountExists || currentDockerodeMounts.length !== expectedMountCount) {
-             Logger.d(
-                `Certbot service credential mount for ${credsFilePathInContainer} is missing, incorrect, or mount count differs. Needs update.`
+        if (!credMountExists || currentDockerodeMounts.length !== expectedTotalMounts) {
+            Logger.d(
+                `Certbot service credential mount for ${credsFilePathInContainer} is missing, incorrect, or total mount count differs. Current: ${currentDockerodeMounts.length}, Expected: ${expectedTotalMounts}. Needs update.`
             )
             needsUpdate = true
         }
 
-
         if (needsUpdate) {
-            Logger.d(`Updating Certbot service (${serviceName}) for DNS-01 challenge mounts or image.`)
+            Logger.d(
+                `Updating Certbot service (${serviceName}) for DNS-01 challenge mounts or image.`
+            )
 
-            // Construct the final list of mounts for updateService, ensuring lowercase properties
-            // And ensure the credential mount is unique by containerPath.
+            // finalMountsForUpdate must be IAppVolume[]
+            // Start with default mounts, then add the new credential mount, ensuring it's unique by containerPath.
             let finalMountsForUpdate = defaultMounts.filter(
-                 // Error TS7006: Parameter 'm' implicitly has an 'any' type. Typed.
-                (m: { hostPath: string; containerPath: string }) => m.containerPath !== newCredentialMountForUpdateService.containerPath
+                (m) => m.containerPath !== newCredentialMountForUpdateService.containerPath
             )
             finalMountsForUpdate.push(newCredentialMountForUpdateService)
 
             await this.dockerApi.updateService(
                 serviceName,
                 targetImage,
-                finalMountsForUpdate, // This should be IAppVolume[] compatible
+                finalMountsForUpdate, // This is IAppVolume[]
                 undefined, // networks - no change
                 undefined, // env vars - no change
                 undefined, // ports - no change
